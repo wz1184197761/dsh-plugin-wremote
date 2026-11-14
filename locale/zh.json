@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "微信投屏",
+    "description": "把本机 wremote 投屏服务（微信单窗口 MJPEG，默认 127.0.0.1:8098）接进 DSH：侧栏一个实时画面面板，点击 / 滚动 / 键盘 / 文本直接回传到远端窗口；同时给模型 wremote_status、wremote_screenshot、wremote_click、wremote_scroll、wremote_type、wremote_key 六个工具，可以自己看画面再操作。插件不重写采集与窗口提顶，只做一层桥。",
+    "detail": "docs/DETAIL.md"
+  }
+}

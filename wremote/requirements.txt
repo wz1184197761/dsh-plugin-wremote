@@ -1,0 +1,4 @@
+opencv-python>=4.10
+numpy>=1.26
+windows-capture>=1.4
+websockets>=13.0

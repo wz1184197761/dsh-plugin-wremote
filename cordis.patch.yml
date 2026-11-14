@@ -1,0 +1,26 @@
+# dsh-wremote：把本机 wremote 投屏服务（微信单窗口 MJPEG，默认 127.0.0.1:8098）
+# 接进 DSH：侧栏实时画面 + 点击/滚动/键盘回传 + 一组 agent 工具。
+#
+# 这里只插入本插件自己的一个条目，不碰别的东西。
+# 服务地址、面板默认行为都放 config，改完重载插件即生效，不用改代码。
+- insert:
+    - id: wremote
+      name: '@local/dsh-wremote'
+      inject:
+        - webServer
+        - agents
+      config:
+        # wremote 服务所在主机。投屏服务跑在本机，保持 127.0.0.1。
+        host: '127.0.0.1'
+        # 服务端口。launch.py 的 --port 决定，当前生产实例是 8098。
+        port: 8098
+        # WebSocket 路径。wremote 的 ws_serve 不区分路径，默认根路径即可。
+        path: '/'
+        # 面板打开时是否自动建立到 8098 的连接（否则等用户点「连接」）。
+        autoConnect: true
+        # 单次 ws 连接最长保持时间（毫秒）。到点主动断开重连，避免长连接僵死。
+        reconnectMs: 4000
+        # 面板里 <img> 的重建间隔（毫秒）：流断了就让浏览器重新拉一次。
+        streamRetryMs: 1200
+        # 工具抓图时最多等首帧的毫秒数。
+        firstFrameTimeoutMs: 6000

@@ -1,0 +1,67 @@
+{
+  "name": "@local/dsh-wremote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mirror a single desktop window (built for WeChat) into a DSH sidebar panel with mouse, wheel, keyboard and text going back to the real window, plus agent tools for status, screenshot, click, scroll, key and text. Ships the Windows capture service it bridges to.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/wsclient.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "wremote",
+    "setup.cmd",
+    "icon.svg"
+  ],
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "wremote",
+    "wechat",
+    "screen-mirror",
+    "remote-control",
+    "windows"
+  ],
+  "license": "MIT",
+  "author": "wwz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1184197761/dsh-plugin-wremote.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1184197761/dsh-plugin-wremote/issues"
+  },
+  "homepage": "https://github.com/1184197761/dsh-plugin-wremote#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": ">=0.2.0"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

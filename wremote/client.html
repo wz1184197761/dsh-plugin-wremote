@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>单窗口远程</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1e1e1e; overflow: hidden;
+               font: 13px/1.4 "Segoe UI", sans-serif; color: #ddd; }
+  #bar { display: none; }
+  #bar input { width: 190px; background: #1b1b1b; border: 1px solid #444;
+               color: #ddd; padding: 2px 6px; border-radius: 3px; }
+  #bar button { background: #3a3a3a; border: 1px solid #555; color: #ddd;
+                padding: 2px 10px; border-radius: 3px; cursor: pointer; }
+  #st { color: #8a8; }
+  #wrap { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+          display: flex; align-items: flex-start; justify-content: flex-start;
+          overflow: hidden; }
+  /* 带 ?vw=&vh= 时由脚本把视口锁成可见区尺寸，画面按像素 1:1 绘制 */
+  body.locked #wrap { right: auto; bottom: auto; }
+  canvas { outline: none; image-rendering: auto;
+           display: block; margin: 0; cursor: default; touch-action: none; }
+  #dim { color: #888; }
+  /* 本地输入法载体：候选框在浏览器里弹（本机可见），选好的文字整段发给远端。
+     1x1 全透明，位置跟随点击点，效果等同"点哪输入、候选框出现在哪"。 */
+  #ime { position: fixed; left: 6px; top: 6px; width: 1px; height: 1px;
+         opacity: 0; background: transparent; border: 0; padding: 0; margin: 0;
+         resize: none; outline: none; z-index: 9; pointer-events: none;
+         font: inherit; color: transparent; caret-color: transparent; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <input id="url">
+  <button id="conn">连接</button>
+  <button id="zoom">1:1</button>
+  <span id="st">未连接</span>
+  <span id="dim"></span>
+  <span id="fps"></span>
+</div>
+<div id="wrap"><canvas id="cv" tabindex="0"></canvas></div>
+<textarea id="ime" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d', { alpha: false });
+const st = document.getElementById('st');
+const fpsEl = document.getElementById('fps');
+let ws = null, frames = 0, t0 = performance.now(), dirty = false, lastSeq = -1;
+let retry = 0, retryTimer = null, geomRetry = 0;
+let imgW = 0, imgH = 0;
+// 采集帧四边各多出 1px 的 DWM 轮廓亮线，绘制时裁掉
+const TRIM = 1;
+// 窗口去掉 WS_CAPTION 后 Chromium 仍在客户区最右 7px 自绘边框，露在屏幕内就是一道黑条。
+// 把画布右侧多画 EXT 列（用画面最右 1px 拉伸），让它盖住那条边框的内侧亮线。
+const EXT = 8;
+
+// 画面按「屏幕上真实可见的那块区域」1:1 绘制，并把这个尺寸回传给服务端去改源窗口大小，
+// 避免「大图抓回来再 CSS 缩」造成的糊。可见区优先取 ?vw=&vh=（窗口侧脚本可显式指定），
+// 否则按「半屏摆放」推算：宽=主屏一半、高=整屏高。窗口被手动缩小到装不下时退回跟随模式。
+const QS = new URLSearchParams(location.search);
+// 默认跟视口走：窗口多大画面就多大，1:1 不缩放；拖动/缩放窗口由下方 resize 监听重算并发 geom。
+// ?vw=&vh= 仍可显式指定固定可见区（排障或特定摆放用）。
+let visW = parseInt(QS.get('vw') || '0', 10) || innerWidth;
+let visH = parseInt(QS.get('vh') || '0', 10) || innerHeight;
+if (visW > innerWidth + 48 || visH > innerHeight + 48) { visW = 0; visH = 0; }
+
+function applyLockedSize() {
+  if (!visW || !visH) return;
+  document.body.classList.add('locked');
+  const wrap = document.getElementById('wrap');
+  // 窗口为了把 DWM 白边推出屏幕，客户区比可见区左右各宽出半个边框。
+  // 视口比 visW 宽出来的部分左右均分，画面才会正好落在屏幕可见区内。
+  const offX = Math.max(0, Math.round((innerWidth - visW) / 2));
+  wrap.style.left = offX + 'px';
+  wrap.style.width = (visW + EXT) + 'px';
+  wrap.style.height = visH + 'px';
+  cv.style.width = (visW + EXT) + 'px';
+  cv.style.height = visH + 'px';
+}
+
+function setStatus(t, color) {
+  st.textContent = t; st.style.color = color || '#8a8';
+  document.title = '单窗口远程 · ' + t;  // 顶部栏已隐藏，状态留在标题里供排障读取
+}
+
+// 从 http(s) 打开时用同源 ws，双击本地文件时回退本机 8098
+document.getElementById('url').value =
+  (location.protocol === 'http:' || location.protocol === 'https:')
+    ? (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
+    : 'ws://127.0.0.1:8098';
+
+// 断线自愈：服务端重启后页面不会自己回来，此前必须手点「连接」，
+// 表现为"画面卡住但看不出异常、点击全部无效"。改成指数退避重连（1s→2s→4s→8s，上限 15s）。
+function scheduleRetry() {
+  if (retryTimer) return;
+  const url = document.getElementById('url').value.trim();
+  if (!url) return;
+  const delay = Math.min(15000, 1000 * Math.pow(2, Math.min(retry, 4)));
+  retry++;
+  retryTimer = setTimeout(() => { retryTimer = null; connect(url); }, delay);
+}
+
+function connect(url) {
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  if (!url) return;
+  setStatus('连接中…', '#cc0');
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    retry = 0;
+    lastPong = Date.now();
+    setStatus('已连接', '#8a8');
+    geomRetry = 0;
+    // 服务端跟真实光标，画面里不带光标；本地系统箭头就是唯一的光标
+    ws.send(JSON.stringify({ t: 'geom', w: visW ? visW + 2 * TRIM : (imgW || cv.width), h: visH ? visH + 2 * TRIM : (imgH || cv.height) }));
+    cv.focus();  // 连上时先别抢到输入载体上，等用户点了再把候选框放到点击处
+  };
+  ws.onclose = () => { setStatus('已断开，重连中…', '#c66'); scheduleRetry(); };
+  window.__ws = ws;  // 排障入口：远程可读 readyState，也可主动 close 验证重连
+  ws.onerror = () => setStatus('连接失败', '#c66');
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === 'string') {   // 文本帧 = 服务端状态通知，不是图片
+      try {
+        const s = JSON.parse(ev.data);
+        if (s.t === 'state') {
+          setStatus(s.hint || '已连接', s.src === 'wgc' ? '#8a8' : '#cc0');
+        } else if (s.t === 'pong') {
+          lastPong = Date.now();
+        }
+      } catch (e) {}
+      return;
+    }
+    try {
+      const bmp = await createImageBitmap(new Blob([ev.data], { type: 'image/jpeg' }));
+      if (imgW !== bmp.width || imgH !== bmp.height) {
+        imgW = bmp.width; imgH = bmp.height;
+        cv.width = imgW - 2 * TRIM + EXT; cv.height = imgH - 2 * TRIM;
+        document.getElementById('dim').textContent = imgW + '×' + imgH;
+        fit();
+        // 锁定尺寸时以 visW/visH 为准；帧还没对齐说明服务端 resize 没生效，重发几次
+        const off = visW && visH &&
+          (Math.abs(imgW - (visW + 2 * TRIM)) > 4 || Math.abs(imgH - (visH + 2 * TRIM)) > 4);
+        if (ws && ws.readyState === 1 && (!(visW && visH) || (off && geomRetry < 3))) {
+          if (off) geomRetry++;
+          ws.send(JSON.stringify({
+            t: 'geom', w: visW ? visW + 2 * TRIM : imgW, h: visH ? visH + 2 * TRIM : imgH }));
+        }
+      }
+      const cw = cv.width - EXT, ch = cv.height;
+      ctx.drawImage(bmp, TRIM, TRIM, imgW - 2 * TRIM, imgH - 2 * TRIM, 0, 0, cw, ch);
+      ctx.drawImage(bmp, imgW - TRIM - 1, TRIM, 1, imgH - 2 * TRIM, cw, 0, EXT, ch);
+      bmp.close();
+      frames++;
+    } catch (e) { /* 丢帧无妨 */ }
+  };
+}
+
+// 上行心跳：服务端重启或隧道断开后 TCP 常处于半开状态——帧照收、readyState 仍是 1，
+// 但页面发出去的输入全部无声丢失（10-30 实测"打字没反应"的根因）。
+// 6 秒收不到 pong 就主动 close，交给 onclose 的重连逻辑。
+let lastPong = 0;
+setInterval(() => {
+  if (!ws || ws.readyState !== 1) return;
+  if (lastPong && Date.now() - lastPong > 15000) {
+    try { ws.close(); } catch (e) {}
+    return;
+  }
+  try { ws.send(JSON.stringify({ t: 'ping' })); } catch (e) {}
+}, 2000);
+
+document.getElementById('conn').onclick = () => {
+  connect(document.getElementById('url').value.trim());
+};
+
+// 从 http(s) 打开页面时自动连同一服务（同一端口既回页面也提供 WS）
+if (location.protocol === 'http:' || location.protocol === 'https:') {
+  connect(document.getElementById('url').value.trim());
+}
+
+const ZOOM_MODES = ['fill', 'fit', '1x1'];
+const ZOOM_LABELS = { fill: '铺满', fit: '适应', '1x1': '1:1' };
+function zoomMode() {
+  const m = location.hash.replace('#', '');
+  return ZOOM_MODES.includes(m) ? m : 'fill';
+}
+function fit() {
+  if (visW && visH) { applyLockedSize(); return; }
+  const wrap = document.getElementById('wrap');
+  const aw = wrap.clientWidth, ah = wrap.clientHeight;
+  if (!imgW || !imgH || !aw || !ah) return;
+  const mode = zoomMode();
+  if (mode === 'fill') {
+    cv.style.width = aw + 'px';
+    cv.style.height = ah + 'px';
+    return;
+  }
+  if (mode === '1x1') {
+    cv.style.width = imgW + 'px';
+    cv.style.height = imgH + 'px';
+    return;
+  }
+  const s = Math.min(aw / imgW, ah / imgH, 1);
+  cv.style.width = Math.round(imgW * s) + 'px';
+  cv.style.height = Math.round(imgH * s) + 'px';
+}
+window.addEventListener('resize', fit);
+
+// 窗口可拖动/可缩放：视口变了就重新和服务端协商采集尺寸，任何大小都保持原始像素 1:1。
+// 去抖 350ms，避免拖拽过程中每一帧都发 geom 把服务端 resize 打乱。
+let geomTimer = null;
+window.addEventListener('resize', () => {
+  if (!visW || !visH) return;
+  clearTimeout(geomTimer);
+  geomTimer = setTimeout(() => {
+    const w = innerWidth, h = innerHeight;
+    if (Math.abs(w - visW) < 2 && Math.abs(h - visH) < 2) { fit(); return; }
+    visW = w; visH = h;
+    applyLockedSize();
+    geomRetry = 0;
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ t: 'geom', w: visW + 2 * TRIM, h: visH + 2 * TRIM }));
+    }
+  }, 350);
+});
+
+const zoomBtn = document.getElementById('zoom');
+function syncZoomBtn() { zoomBtn.textContent = ZOOM_LABELS[zoomMode()]; }
+zoomBtn.onclick = () => {
+  const i = ZOOM_MODES.indexOf(zoomMode());
+  const next = ZOOM_MODES[(i + 1) % ZOOM_MODES.length];
+  location.hash = next;
+  syncZoomBtn();
+  fit();
+};
+syncZoomBtn();
+applyLockedSize();
+window.addEventListener('hashchange', () => { syncZoomBtn(); fit(); });
+
+setInterval(() => {
+  const now = performance.now();
+  const f = (frames * 1000) / (now - t0);
+  fpsEl.textContent = f.toFixed(1) + ' fps';
+  frames = 0; t0 = now;
+}, 1000);
+
+// 画布 = 1:1 区 (imgW-2*TRIM) 宽 + 右缘 EXT 拉伸列，且整帧四边各裁掉 TRIM。
+// 直接按 imgW/cv宽 换算会漏掉裁边与拉伸列，右侧累积偏差可达 5px（点小控件偏）。
+function pos(ev) {
+  const r = cv.getBoundingClientRect();
+  const kx = r.width ? cv.width / r.width : 1;
+  const ky = r.height ? cv.height / r.height : 1;
+  const px = (ev.clientX - r.left) * kx;
+  const py = (ev.clientY - r.top) * ky;
+  const body = cv.width - EXT;
+  const x = px >= body
+    ? imgW - TRIM - 1
+    : TRIM + Math.round(px * (imgW - 2 * TRIM) / Math.max(1, body));
+  const y = TRIM + Math.round(py * (imgH - 2 * TRIM) / Math.max(1, cv.height));
+  return { x: Math.max(0, Math.min(imgW - 1, x)), y: Math.max(0, Math.min(imgH - 1, y)) };
+}
+
+let lastSend = 0, lastMove = null, dragging = false, dragId = null, dragBtn = 'down';
+function sendMove(p) {
+  lastMove = p;
+  // 用时间戳节流而不是 requestAnimationFrame：标签页不可见时 rAF 会整体停摆，
+  // 拖动期间的 move 全部丢失（实测服务端 moves=0，窗口纹丝不动）。
+  const now = performance.now();
+  if (now - lastSend < 16) return;
+  lastSend = now;
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'm', ...lastMove, a: 'move' }));
+}
+
+// pointer 事件 + setPointerCapture：拖远端窗口时指针必然移出 canvas（甚至移出浏览器），
+// 只靠 window 上的 mouse 事件在边界处会断流，远端窗口停在半路。
+cv.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0 && ev.button !== 1 && ev.button !== 2) return;
+  dragging = true;
+  dragId = ev.pointerId;
+  try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
+  const p = pos(ev);
+  dragBtn = ev.button === 0 ? 'down' : ev.button === 2 ? 'rdown' : 'md';
+  ws && ws.readyState === 1 && ws.send(JSON.stringify({ t: 'm', ...p, a: dragBtn }));
+  focusIme(ev.clientX, ev.clientY);
+  ev.preventDefault();
+});
+
+cv.addEventListener('pointermove', (ev) => {
+  if (!dragging) return;
+  sendMove(pos(ev));
+});
+
+function endDrag(ev) {
+  if (!dragging) return;
+  dragging = false;
+  if (dragId !== null) {
+    try { cv.releasePointerCapture(dragId); } catch (e) {}
+    dragId = null;
+  }
+  const p = pos(ev);
+  const a = dragBtn === 'down' ? 'up' : dragBtn === 'rdown' ? 'rup' : 'mu';
+  ws && ws.readyState === 1 && ws.send(JSON.stringify({ t: 'm', ...p, a }));
+  ev.preventDefault();
+}
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+
+// 未按下时的悬停：把远端光标带到指针位置
+window.addEventListener('pointermove', (ev) => {
+  if (dragging || !cv.contains(ev.target)) return;
+  sendMove(pos(ev));
+});
+cv.addEventListener('contextmenu', (e) => e.preventDefault());
+cv.addEventListener('wheel', (ev) => {
+  const p = pos(ev);
+  ws && ws.readyState === 1 && ws.send(JSON.stringify({
+    t: 'm', ...p, a: 'wheel', d: ev.deltaY > 0 ? -120 : 120
+  }));
+  ev.preventDefault();
+}, { passive: false });
+
+const MODS = { 16: 'shift', 17: 'ctrl', 18: 'alt', 91: 'meta' };
+// 键盘挂在 window 上：canvas 的 pointerdown 里有 preventDefault()，会挡住默认聚焦，
+// 焦点一丢挂在 cv 上的 keydown 就再也收不到（表现为"没法打字"）。
+function isTypingTarget(el) {
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+}
+
+const ime = document.getElementById('ime');
+// 远端光标位置拿不到：远端候选框是独立顶层窗口，既采集不到也没有坐标接口。
+// 所以只能把载体放到本次点击点——那就是用户想输入的位置，候选框由浏览器贴在它旁边弹出，
+// 点完不再跟随鼠标；越界由浏览器自己翻边，这里不人为夹取。
+function focusIme(cx, cy) {
+  if (cx != null && cy != null) {
+    ime.style.left = Math.round(cx) + 'px';
+    ime.style.top = Math.round(cy) + 'px';
+  }
+  try { ime.focus({ preventScroll: true }); } catch (e) { cv.focus(); }
+}
+function sendText(s) {
+  if (s && ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'text', s }));
+}
+// 输入法放在本机跑：组字和候选框都在浏览器里完成，远端只收最终文本。
+// 远端自己弹候选框是采集不到的——那是独立的顶层窗口，不属于微信窗口。
+let imeComposing = false;
+ime.addEventListener('compositionstart', () => { imeComposing = true; });
+ime.addEventListener('compositionend', (ev) => {
+  imeComposing = false;
+  sendText(ev.data);
+  ime.value = '';
+});
+ime.addEventListener('input', (ev) => {
+  if (imeComposing || ev.isComposing) return;        // 组字中的半成品不发
+  if (ev.inputType === 'insertCompositionText') return;  // compositionend 已经发过
+  if (ev.inputType === 'insertText') sendText(ev.data != null ? ev.data : ime.value);
+  ime.value = '';
+});
+// 浏览器自己的快捷键必须放行，否则页面把 F5/Ctrl+R 一起转发给远端，页面永远刷新不了
+function isBrowserShortcut(ev) {
+  return ev.keyCode === 116 || (ev.ctrlKey && !ev.shiftKey && ev.keyCode === 82)
+      || (ev.ctrlKey && ev.shiftKey && ev.keyCode === 82);
+}
+ime.addEventListener('keydown', (ev) => {
+  if (isBrowserShortcut(ev)) return;
+  if (ev.isComposing || ev.keyCode === 229) return;  // 输入法正在处理这个键
+  const printable = ev.key.length === 1 && !ev.ctrlKey && !ev.altKey && !ev.metaKey;
+  if (printable) return;                             // 可见字符走 input 事件（带本地候选框）
+  heldKeys.add(ev.keyCode);
+  sendKey(ev.keyCode, false);
+  ev.preventDefault();
+  ev.stopPropagation();
+});
+ime.addEventListener('keyup', (ev) => {
+  if (ev.isComposing || ev.keyCode === 229) return;
+  const printable = ev.key.length === 1 && !ev.ctrlKey && !ev.altKey && !ev.metaKey;
+  if (printable) return;
+  heldKeys.delete(ev.keyCode);
+  sendKey(ev.keyCode, true);
+  ev.preventDefault();
+  ev.stopPropagation();
+});
+const heldKeys = new Set();
+function sendKey(vk, up) {
+  // Win 键不转发：浏览器被系统抢占后不保证补 keyup，远端一卡住，之后每个字符
+  // 都变成 Win 组合键（单按 A 直接弹快速设置，微信一个字符也收不到，10-30 实测）
+  if (vk === 91 || vk === 92) return;
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'k', vk, up }));
+}
+// 切窗口/切标签时浏览器不给 keyup，按键会卡在远端（修饰键卡住后所有输入都变成快捷键）
+function releaseHeld() {
+  for (const vk of heldKeys) sendKey(vk, true);
+  heldKeys.clear();
+}
+// 焦点不在输入法载体上（例如刚打开页面）时退回逐键转发，保证快捷键仍可用
+window.addEventListener('keydown', (ev) => {
+  if (isBrowserShortcut(ev)) return;
+  if (ev.target === ime || isTypingTarget(ev.target)) return;
+  heldKeys.add(ev.keyCode);
+  sendKey(ev.keyCode, false);
+  ev.preventDefault();
+});
+window.addEventListener('keyup', (ev) => {
+  if (ev.target === ime || isTypingTarget(ev.target)) return;
+  heldKeys.delete(ev.keyCode);
+  sendKey(ev.keyCode, true);
+  ev.preventDefault();
+});
+window.addEventListener('blur', releaseHeld);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseHeld(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "WeChat mirror",
+    "description": "Bridges the local wremote service (single-window WeChat MJPEG on 127.0.0.1:8098) into DSH: a live sidebar panel where clicks, scrolling, keys and text go straight back to the remote window, plus wremote_status, wremote_screenshot, wremote_click, wremote_scroll, wremote_type and wremote_key tools so the model can look at the view and act on it. The plugin does not reimplement capture or window raising, it only bridges.",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,17 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# service runtime output
+wremote/*.log
+wremote/server.err.log
+
+# node
+node_modules/
+
+# editors / os
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
