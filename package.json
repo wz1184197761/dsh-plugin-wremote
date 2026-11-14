@@ -42,12 +42,12 @@
   "author": "wwz",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/1184197761/dsh-plugin-wremote.git"
+    "url": "git+https://github.com/wz1184197761/dsh-plugin-wremote.git"
   },
   "bugs": {
-    "url": "https://github.com/1184197761/dsh-plugin-wremote/issues"
+    "url": "https://github.com/wz1184197761/dsh-plugin-wremote/issues"
   },
-  "homepage": "https://github.com/1184197761/dsh-plugin-wremote#readme",
+  "homepage": "https://github.com/wz1184197761/dsh-plugin-wremote#readme",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
