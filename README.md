@@ -42,11 +42,11 @@ the service on port 8098. WeChat must be running — the service locates its mai
 To start it later without reinstalling:
 
 ```bat
-.venv\Scripts\python.exe launch.py --port 8098 --fps 20 --quality 85
+.venv\Scripts\python.exe wremote\launch.py --port 8098 --fps 20 --quality 85
 ```
 
-`launch.py` is idempotent: if the port is already listening it exits immediately, so it is safe to
-call from a scheduled task or a shortcut.
+`wremote\launch.py` is idempotent: if the port is already listening it exits immediately, so it is
+safe to call from a scheduled task or a shortcut.
 
 ### 2. The DSH plugin
 
